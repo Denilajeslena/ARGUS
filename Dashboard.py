@@ -1,3 +1,29 @@
+
+import secrets
+import json
+import os
+
+
+# Persistent token store
+RESET_TOKEN_FILE = "reset_tokens.json"
+
+def load_tokens():
+    if os.path.exists(RESET_TOKEN_FILE):
+        try:
+            with open(RESET_TOKEN_FILE, "r") as f:
+                tokens = json.load(f)
+                return tokens
+        except Exception:
+            return {}
+    return {}
+
+
+def save_tokens(tokens):
+    with open(RESET_TOKEN_FILE, "w") as f:
+        json.dump(tokens, f)
+
+RESET_TOKENS = load_tokens()
+
 import tempfile
 import time
 from datetime import datetime
@@ -5,60 +31,409 @@ from pathlib import Path
 
 import cv2
 import streamlit as st
+import random
+
+# ---------------- OTP STORAGE ----------------
+if "otp" not in st.session_state:
+    st.session_state.otp = None
+if "otp_email" not in st.session_state:
+    st.session_state.otp_email = None
+import random
+import smtplib
+from email.mime.text import MIMEText
+import uuid
+
+# ---------------- OTP STORAGE ----------------
+if "otp" not in st.session_state:
+    st.session_state.otp = None
+if "otp_email" not in st.session_state:
+    st.session_state.otp_email = None
+
+# ---------------- DEVICE BINDING ----------------
+def get_device_id():
+    return str(uuid.getnode())
+
+# ---------------- SEND OTP ----------------
+def send_otp(email):
+    otp = str(random.randint(100000, 999999))
+    st.session_state.otp = otp
+    st.session_state.otp_email = email
+
+    # ⚠️ Replace with your email and app password
+    sender = "argusmp3@gmail.com"
+    password = "mwxf vpmq dkla ishz"
+
+    msg = MIMEText(f"Your ARGUS OTP is: {otp}")
+    msg["Subject"] = "ARGUS Login OTP"
+    msg["From"] = sender
+    msg["To"] = email
+
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender, password)
+        server.sendmail(sender, email, msg.as_string())
+        server.quit()
+        return True
+    except:
+        return False
+
+# ---------------- SEND RESET EMAIL (SIMPLE) ----------------
+def send_reset(email):
+    sender = "argusmp3@gmail.com"
+    password = "mwxf vpmq dkla ishz"
+    # Generate a reset token
+    token = secrets.token_urlsafe(24)
+    RESET_TOKENS[token] = {"email": email, "created": time.time()}
+    save_tokens(RESET_TOKENS)
+    reset_link = f"http://localhost:8501/?reset_token={token}"
+    msg = MIMEText(f"Click the link to reset your password: {reset_link} (valid for 10 minutes)")
+    msg["Subject"] = "ARGUS Reset"
+    msg["From"] = sender
+    msg["To"] = email
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender, password)
+        server.sendmail(sender, email, msg.as_string())
+        server.quit()
+        return True
+    except:
+        return False
+
+# Verify reset token
+def verify_reset_token(token):
+    data = RESET_TOKENS.get(token)
+    if not data:
+        return None
+    # Token valid for 10 minutes (600 seconds)
+    # To disable expiry for demo, comment out the next 4 lines:
+    # if time.time() - data["created"] > 600:
+    #     del RESET_TOKENS[token]
+    #     save_tokens(RESET_TOKENS)
+    #     return None
+    return data["email"]
+
+# Update password in USER_DB
+def update_password(email, new_password):
+    if email in USER_DB:
+        USER_DB[email] = new_password
+        save_user_db(USER_DB)
+        return True
+    return False
 
 from alert import get_alerts
 from main import DEFAULT_ROI, RealtimeDetectionService, parse_video_source, run_detection
 
-st.set_page_config(page_title="ARGUS Security Dashboard", layout="wide")
 
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: radial-gradient(circle at 20% 10%, #18212e 0%, #0e1117 42%, #0a0d12 100%);
-        color: #e8edf7;
-    }
-    .top-title {
-        font-size: 2rem;
-        font-weight: 700;
-        letter-spacing: 0.3px;
-        margin-bottom: 0.2rem;
-    }
-    .sub-title {
-        color: #a8b3c7;
-        font-size: 1rem;
-        margin-bottom: 0.8rem;
-    }
-    .live-dot {
-        height: 10px;
-        width: 10px;
-        background-color: #2ecc71;
-        border-radius: 50%;
-        display: inline-block;
-        margin-right: 6px;
-        box-shadow: 0 0 10px #2ecc71;
-    }
-    .section-card {
-        background: linear-gradient(135deg, rgba(28,36,52,0.9), rgba(18,24,36,0.9));
-        border: 1px solid rgba(129, 159, 199, 0.2);
-        border-radius: 14px;
-        padding: 16px;
-        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
-        margin-bottom: 14px;
-    }
-    .card-title {
-        color: #d9e3f5;
-        font-weight: 600;
-        margin-bottom: 4px;
-    }
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #121823 0%, #0f1520 100%);
-        border-right: 1px solid rgba(139, 174, 221, 0.15);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ---------------- PAGE CONFIG ----------------
+st.set_page_config(page_title="ARGUS Security System", layout="wide")
+
+# ---------------- SESSION STATE ----------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "page" not in st.session_state:
+    st.session_state.page = "login"
+
+# ---------------- PERSISTENT USER DATABASE ----------------
+USER_DB_FILE = "user_db.json"
+def load_user_db():
+    if os.path.exists(USER_DB_FILE):
+        try:
+            with open(USER_DB_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Default user if file missing or error
+    return {"argusmp3@gmail.com": "nithu123456"}
+
+def save_user_db(user_db):
+    with open(USER_DB_FILE, "w") as f:
+        json.dump(user_db, f)
+
+USER_DB = load_user_db()
+
+# ---------------- STYLING ----------------
+st.markdown("""
+<style>
+
+/* BACKGROUND */
+.stApp {
+    background: #000000;
+    color: white;
+}
+
+/* CENTER CARD */
+.login-card {
+    background: transparent !important;
+    padding: 2.5rem;
+    border-radius: 18px;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    animation: fadeIn 0.8s ease-in-out;
+}
+
+/* ARGUS TITLE */
+.title {
+    text-align: center;
+    font-size: 42px;
+    font-weight: 900;
+    color: white;
+    letter-spacing: 6px;
+
+    /* 🔥 GLOW EFFECT */
+    text-shadow:
+        0 0 10px rgba(255,255,255,0.6),
+        0 0 20px rgba(255,255,255,0.4),
+        0 0 40px rgba(255,255,255,0.2);
+}
+
+/* SUBTITLE */
+.subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #777;
+    margin-bottom: 25px;
+}
+
+/* INPUTS */
+.stTextInput > div > div > input {
+    background: #111 !important;
+    border: 1px solid #222 !important;
+    border-radius: 10px !important;
+    color: #ccc !important;
+}
+
+
+/* BUTTON BASE */
+.stButton {
+    display: flex;
+    justify-content: center;
+}
+
+/* BUTTON STYLE */
+.stButton>button {
+    min-width: 140px !important;
+    max-width: 240px !important;
+    width: auto !important;
+    padding: 0.7rem 2.2rem !important;
+    border-radius: 12px !important;
+    background: white !important;
+    color: black !important;
+    font-weight: bold;
+    letter-spacing: 1px;
+    font-size: 1.1rem !important;
+    transition: 0.3s;
+    margin: 0.5rem auto 0.5rem auto;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* BUTTON HOVER */
+.stButton>button:hover {
+    transform: scale(1.04);
+    box-shadow: 0 0 15px rgba(255,255,255,0.6);
+}
+
+/* WARNING BOX */
+.stAlert {
+    border-radius: 10px;
+}
+
+/* ANIMATION */
+@keyframes fadeIn {
+    from {opacity: 0; transform: translateY(15px);}
+                    token = generate_reset_token(email)
+                    sent = send_reset_email(email, token)
+                    if sent:
+                        st.success("📧 Reset link sent to your email!")
+                    else:
+                        st.error("Failed to send email. Check SMTP credentials.")
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- LOGIN PAGE ----------------
+def login_page():
+    col1, col2, col3 = st.columns([1,2,1])
+
+    with col2:
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+
+        st.markdown('<div class="title">ARGUS</div>', unsafe_allow_html=True)
+        st.markdown('<div class="subtitle">AI Surveillance & Security System</div>', unsafe_allow_html=True)
+
+        email = st.text_input("Employee Email / ID")
+        password = st.text_input("Password", type="password")
+
+        st.warning("Authorized personnel only. All activities are monitored.")
+
+
+        # STEP 1: VERIFY PASSWORD
+        if st.button("Login"):
+            if not email or not password:
+                st.warning("Enter email & password")
+            elif email in USER_DB and USER_DB[email] == password:
+                # generate OTP
+                otp = str(random.randint(100000, 999999))
+                st.session_state.otp = otp
+                st.session_state.otp_email = email
+
+                # Send OTP via email
+                sender = "argusmp3@gmail.com"
+                sender_password = "mwxf vpmq dkla ishz"
+                msg = MIMEText(f"Your ARGUS OTP is: {otp}")
+                msg["Subject"] = "ARGUS Login OTP"
+                msg["From"] = sender
+                msg["To"] = email
+                try:
+                    server = smtplib.SMTP("smtp.gmail.com", 587)
+                    server.starttls()
+                    server.login(sender, sender_password)
+                    server.sendmail(sender, email, msg.as_string())
+                    server.quit()
+                    st.success("OTP sent to your email")
+                    st.session_state.page = "otp"
+                    st.rerun()
+                except Exception as e:
+                    st.error("Failed to send OTP email. Check SMTP credentials.")
+            else:
+                st.error("Invalid credentials")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        if st.button("Forgot Password?"):
+            st.session_state.page = "forgot"
+            st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------------- OTP PAGE ----------------
+def otp_page():
+    col1, col2, col3 = st.columns([1,2,1])
+
+    with col2:
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+
+        st.markdown('<div class="title">VERIFY OTP</div>', unsafe_allow_html=True)
+        st.markdown('<div class="subtitle">Enter the code sent to your email</div>', unsafe_allow_html=True)
+
+
+        otp_input = st.text_input("Enter OTP")
+
+        if st.button("Verify OTP"):
+            if otp_input == st.session_state.otp:
+                st.session_state.logged_in = True
+                st.session_state.otp = None  # Clear OTP after successful login
+                st.success("Login successful")
+                st.rerun()
+            else:
+                st.error(f"Invalid OTP. (Expected: {st.session_state.otp}, Got: {otp_input})")
+
+        if st.button("Back"):
+            st.session_state.page = "login"
+            st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------------- FORGOT PASSWORD ----------------
+def forgot_password():
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+        st.markdown('<div class="title">Reset Password</div>', unsafe_allow_html=True)
+        st.markdown('<div class="subtitle">Enter your registered email</div>', unsafe_allow_html=True)
+        email = st.text_input("Email")
+        if st.button("Send Reset Link"):
+            if email in USER_DB:
+                success = send_reset(email)
+                if success:
+                    st.success("📧 Reset link sent to your email!")
+                else:
+                    st.error("Failed to send email. Check SMTP credentials.")
+            else:
+                st.error("Email not found")
+        if st.button("⬅ Back to Login"):
+            st.session_state.page = "login"
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------------- RESET PASSWORD PAGE ----------------
+def reset_password_page(token):
+    email = verify_reset_token(token)
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+        st.markdown('<div class="title">Set New Password</div>', unsafe_allow_html=True)
+        if not email:
+            st.error("Invalid or expired reset link.")
+            return
+        st.info(f"Resetting password for: {email}")
+        new_pass = st.text_input("New Password", type="password")
+        confirm_pass = st.text_input("Confirm Password", type="password")
+        if st.button("Update Password"):
+            if not new_pass or not confirm_pass:
+                st.warning("Please fill both fields.")
+            elif new_pass != confirm_pass:
+                st.error("Passwords do not match.")
+            else:
+                update_password(email, new_pass)
+                st.success("Password updated! You can now login.")
+                if token in RESET_TOKENS:
+                    del RESET_TOKENS[token]
+                    save_tokens(RESET_TOKENS)
+                st.session_state.page = "login"
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------------- ROUTING (IMPORTANT) ----------------
+if not st.session_state.logged_in:
+    # Robust query param detection for all Streamlit versions
+    token = None
+    query_params = {}
+    try:
+        if hasattr(st, "query_params"):
+            query_params = st.query_params
+        elif hasattr(st, "experimental_get_query_params"):
+            query_params = st.experimental_get_query_params()
+    except Exception:
+        pass
+    if "reset_token" in query_params:
+        val = query_params["reset_token"]
+        if isinstance(val, list):
+            token = val[0]
+        else:
+            token = val
+
+    if token:
+        reset_password_page(token)
+        st.stop()
+    elif st.session_state.page == "login":
+        login_page()
+    elif st.session_state.page == "forgot":
+        forgot_password()
+    elif st.session_state.page == "otp":
+        otp_page()
+    st.stop()   # ⛔ stops dashboard before login
+
+# ============================================================
+# 🔥 YOUR EXISTING DASHBOARD CODE STARTS BELOW
+# ============================================================
+
+st.sidebar.success("🟢 System Active")
+
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.session_state.page = "login"
+    st.rerun()
+
+st.title("ARGUS Dashboard")
+
+# ...existing code...
 
 if "camera_running" not in st.session_state:
     st.session_state.camera_running = False
